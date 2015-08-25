@@ -3,8 +3,8 @@ module ParticleFilters
 using Distributions
 using StatsBase
 
-import PyPlot.plot
-using PyPlot
+# import PyPlot.plot
+# using PyPlot
 
 export ParticleFilterEstimator, update!
 
@@ -13,56 +13,76 @@ X is an MxN array representing N particles, each with M state variables
 """
 type ParticleFilterEstimator
     X::Array{Float64, 2}
+    ranges::Array{Float64, 2}
+    anchors::Array{Float64, 2}
 
-    ParticleFilterEstimator() = new(rand(3, 1000) .* [6, 3, 6] .- [3, 0, 3])
-end
+    function ParticleFilterEstimator(n::Integer, xrange, yrange, zrange, anchors)
+        xdiff = maximum(xrange) - minimum(xrange)
+        ydiff = maximum(yrange) - minimum(yrange)
+        zdiff = maximum(zrange) - minimum(zrange)
 
-function plot(pf::ParticleFilterEstimator, z=nothing)
-    if z == nothing
-        c = nothing
-    else
-        l(x) = likelihood(x, z)
-        c = vec(mapslices(l, pf.X, 1))
+        xoff = minimum(xrange)
+        yoff = minimum(yrange)
+        zoff = minimum(zrange)
+        particlesInit = rand(3, n) .* [xdiff, ydiff, zdiff] .- [xoff, yoff, zoff]
+        ranges = [xrange[1] yrange[1] zrange[1];
+                  xrange[2] yrange[2] zrange[2]]
+        new(particlesInit, ranges, anchors)
     end
 
-    if size(pf.X, 1) == 2
-        # assume the first 2 state variables are x, y
-        if c != nothing
-            scatter(pf.X[1, :], pf.X[2, :], c=c, s=5)
-            colorbar()
-        else
-            scatter(pf.X[1, :], pf.X[2, :], s=5)
-        end
-    elseif size(pf.X, 1) > 2
-        # assume the first 3 state variables are x, y, z
-        if c != nothing
-            scatter3D(pf.X[1, :]', pf.X[2, :]', pf.X[3, :]', c=c, s=5)
-        else
-            scatter3D(pf.X[1, :]', pf.X[2, :]', pf.X[3, :]', s=5)
-        end
-    else
-        println("Must have at least 2 dimensions to plot")
+    function ParticleFilterEstimator(n::Integer=1000)
+        # anchor locations for Fluid optitrack test
+        anchors = [ -1.1082  2.0964  1.9340 -0.7987;
+                  2.3606  2.3635  2.3635  2.3606;
+                  4.0778  3.8079 -1.8402 -1.7995]
+
+        ParticleFilterEstimator(n, (-3, 3), (0, 3), (-3, 3), anchors)
     end
 end
 
-"""
-Plots the likelihood with the given observation
-"""
-function plotlikelihood(pf::ParticleFilterEstimator, z::Vector)
-    v = linspace(0, 1, 100)
-    l = Array(Float64, 100, 100)
-    for (i, x) in enumerate(v)
-        for (j, y) in enumerate(v)
-            l[i, j] = likelihood([x, y], z)
-        end
-    end
-
-    imshow(l; origin="lower")
-    colorbar()
-end
-
-any([false, false, false])
-diag([1 2 3; 4 5 6; 7 8 9])
+# function plot(pf::ParticleFilterEstimator, z=nothing)
+#     if z == nothing
+#         c = nothing
+#     else
+#         l(x) = likelihood(x, z)
+#         c = vec(mapslices(l, pf.X, 1))
+#     end
+#
+#     if size(pf.X, 1) == 2
+#         # assume the first 2 state variables are x, y
+#         if c != nothing
+#             scatter(pf.X[1, :], pf.X[2, :], c=c, s=5)
+#             colorbar()
+#         else
+#             scatter(pf.X[1, :], pf.X[2, :], s=5)
+#         end
+#     elseif size(pf.X, 1) > 2
+#         # assume the first 3 state variables are x, y, z
+#         if c != nothing
+#             scatter3D(pf.X[1, :]', pf.X[2, :]', pf.X[3, :]', c=c, s=5)
+#         else
+#             scatter3D(pf.X[1, :]', pf.X[2, :]', pf.X[3, :]', s=5)
+#         end
+#     else
+#         println("Must have at least 2 dimensions to plot")
+#     end
+# end
+#
+# """
+# Plots the likelihood with the given observation
+# """
+# function plotlikelihood(pf::ParticleFilterEstimator, z::Vector)
+#     v = linspace(0, 1, 100)
+#     l = Array(Float64, 100, 100)
+#     for (i, x) in enumerate(v)
+#         for (j, y) in enumerate(v)
+#             l[i, j] = likelihood([x, y], z)
+#         end
+#     end
+#
+#     imshow(l; origin="lower")
+#     colorbar()
+# end
 
 function update!(pf::ParticleFilterEstimator, u, z, maxiters=20, thresh=[0.01, 0.02, 0.01])
     errbias = [0.1153, 0.0571, 0.0237, 0.0538]
@@ -81,7 +101,7 @@ function update!(pf::ParticleFilterEstimator, u, z, maxiters=20, thresh=[0.01, 0
     iters = 0
     while iters < maxiters
         X2 = predict(pf.X, u)
-        w = weights(X2, z)
+        w = weights(X2, z, pf)
         pf.X, _ = resample(X2, w)
         fitnorm = fit(DiagNormal, pf.X)
         iters += 1
@@ -109,27 +129,26 @@ end
 """
 Computes the likelihood of the obvservation z given the state x
 """
-function likelihood(x::Vector{Float64}, z::Vector{Float64})
-     anchors = [ -1.1082  2.0964  1.9340 -0.7987;
-                  2.3606  2.3635  2.3635  2.3606;
-                  4.0778  3.8079 -1.8402 -1.7995]
-
+function likelihood(x::Vector{Float64}, z::Vector{Float64}, pf::ParticleFilterEstimator)
     # approximate std dev (rounded up a bit) from measured data
     d = Normal(0.0, 0.035)
 
     l = 1.0
     for i in 1:length(z)
         if z[i] != -1.0
-            l *= (0.2 + 0.8 * pdf(d, norm(x - anchors[:, i]) - z[i]))
+            l *= (0.2 + 0.8 * pdf(d, norm(x - pf.anchors[:, i]) - z[i]))
         else
             l *= 0.2
         end
     end
 
-    if !(0 < x[2] < 2.6)
-        # add a height prior (height of the ceiling). without this we sometimes got
-        # solutions reflected across the plane of the anchors
-        l = 0.0
+    for i in 1:3
+        if !(pf.ranges[1, i] < x[i] < pf.ranges[2, i])
+            # keep our solutions inside the box. This is particularly an issue
+            # for reflections across the plane of the sensors, but is also to keep
+            # the particle population from drifting out too much if there's no data
+            l = 0.0
+        end
     end
 
     l
@@ -139,7 +158,7 @@ end
 Given the current state X and measurement vector z, generate a weight vector for
 the state estimates
 """
-function weights(X::Array{Float64, 2}, z::Vector{Float64})
+function weights(X::Array{Float64, 2}, z::Vector{Float64}, pf::ParticleFilterEstimator)
     # for i in 1:length(z)
     #     # get the difference vector from each location to anchor i
     #     diff = X .- anchors[:, i]
@@ -152,7 +171,7 @@ function weights(X::Array{Float64, 2}, z::Vector{Float64})
     # end
 
     # create a temporary function to compute the likelihood with the given z
-    l(x::Vector{Float64}) = likelihood(x, z)
+    l(x::Vector{Float64}) = likelihood(x, z, pf)
 
     w = vec(mapslices(l, X, 1))
     # now normalize the weights
